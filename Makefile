@@ -12,17 +12,17 @@ default: $(DEFAULT_TARGET)
 
 VERBOSE ?= 0
 
-CHPL := chpl
+CHPL := chpl  
 CHPL_DEBUG_FLAGS += --print-passes
 ifdef ARKOUDA_DEVELOPER
-CHPL_FLAGS += --ccflags="-O1"
+CHPL_FLAGS += --ccflags="-O0"
 else ifdef ARKOUDA_QUICK_COMPILE
 CHPL_FLAGS += --no-checks --no-loop-invariant-code-motion --no-fast-followers --ccflags="-O0"
 else
 CHPL_FLAGS += --fast
 endif
 CHPL_FLAGS += -smemTrack=true
-CHPL_FLAGS += -lhdf5 -lhdf5_hl -lzmq
+CHPL_FLAGS += -lhdf5 -lhdf5_hl -lzmq -lfam_vol_connector
 
 # add-path: Append custom paths for non-system software.
 # Note: Darwin `ld` only supports `-rpath <path>`, not `-rpath=<paths>`.
@@ -66,6 +66,7 @@ HDF5_VER := 1.10.5
 HDF5_NAME_VER := hdf5-$(HDF5_VER)
 HDF5_BUILD_DIR := $(DEP_BUILD_DIR)/$(HDF5_NAME_VER)
 HDF5_INSTALL_DIR := $(DEP_INSTALL_DIR)/hdf5-install
+#HDF5_INSTALL_DIR := /usr/local/HDF_Group/HDF5/1.13.0/lib
 HDF5_LINK :=  https://support.hdfgroup.org/ftp/HDF5/releases/hdf5-$(HDF5_MAJ_MIN_VER)/$(HDF5_NAME_VER)/src/$(HDF5_NAME_VER).tar.gz
 install-hdf5:
 	@echo "Installing HDF5"

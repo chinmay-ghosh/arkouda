@@ -19,12 +19,15 @@ module GenSymIO {
     use Message;
     use ServerConfig;
     
+    config const FAM_CONNECTOR:bool = true;
+    extern proc H5Pset_fapl_FAM(fapl : C_HDF5.hid_t) : C_HDF5.herr_t;
     const gsLogger = new Logger();
   
     if v {
         gsLogger.level = LogLevel.DEBUG;
     } else {
-        gsLogger.level = LogLevel.INFO;
+//        gsLogger.level = LogLevel.INFO;
+	gsLogger.level = LogLevel.DEBUG;
     } 
 
     config const GenSymIO_DEBUG = false;
@@ -33,7 +36,23 @@ module GenSymIO {
     config const NULL_STRINGS_VALUE = 0:uint(8);
     config const TRUNCATE: int = 0;
     config const APPEND: int = 1;
+    var fapl: [0..#Locales.size] C_HDF5.hid_t;
 
+    if FAM_CONNECTOR {
+        coforall loc in Locales do on loc {
+	    var lc_fapl : C_HDF5.hid_t;
+            lc_fapl =  C_HDF5.H5Pcreate(C_HDF5.H5P_FILE_ACCESS);
+
+            if(H5Pset_fapl_FAM(lc_fapl) < 0) {
+	        var errorMsg = "FAM connector registration failed";
+                try! gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),
+                                    errorMsg);
+	        writeln(errorMsg);
+//	        exit(-1);
+            }
+	fapl[here.id] = lc_fapl;
+        }
+    }
     /*
      * Creates a pdarray server-side and returns the SymTab name used to
      * retrieve the pdarray from the SymTab.
@@ -282,12 +301,13 @@ module GenSymIO {
 
             gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                "glob expanded %s to %i files".format(filelist[0], tmp.size));
-            if tmp.size == 0 {
-                var errorMsg = "Error: no files matching %s".format(filelist[0]);
-                gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
-                return new MsgTuple(errorMsg, MsgType.ERROR);  
-            }
-
+	    if !FAM_CONNECTOR {
+                if tmp.size == 0 {
+                    var errorMsg = "Error: no files matching %s".format(filelist[0]);
+                    gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
+                    return new MsgTuple(errorMsg, MsgType.ERROR);  
+                }
+	    }
             // Glob returns filenames in weird order. Sort for consistency
             sort(tmp);
             filedom = tmp.domain;
@@ -478,11 +498,13 @@ module GenSymIO {
             var tmp = glob(filelist[0]);
             gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                   "glob expanded %s to %i files".format(filelist[0], tmp.size));
-            if tmp.size == 0 {
-                var errorMsg = "No files matching %s".format(filelist[0]);
-                gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
-                return new MsgTuple(errorMsg, MsgType.ERROR);
-            }
+	    if !FAM_CONNECTOR {
+                if tmp.size == 0 {
+                    var errorMsg = "No files matching %s".format(filelist[0]);
+                    gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
+                    return new MsgTuple(errorMsg, MsgType.ERROR);
+                }
+	    }
             // Glob returns filenames in weird order. Sort for consistency
             sort(tmp);
             filedom = tmp.domain;
@@ -675,18 +697,24 @@ module GenSymIO {
          * in opening file to check format, it is highly likely it is due to 
          * a permissions issue, so a PermissionError is thrown.
          */             
-        if !isHdf5File(filename) {
-            throw getErrorWithContext(
+	if !FAM_CONNECTOR {
+            if !isHdf5File(filename) {
+                throw getErrorWithContext(
                            msg="%s is not an HDF5 file".format(filename),
                            lineNumber=getLineNumber(),
                            routineName=getRoutineName(), 
                            moduleName=getModuleName(),
                            errorClass="NotHDF5FileError");        
-        }
-        
-        var file_id = C_HDF5.H5Fopen(filename.c_str(), 
+            }
+	}
+	var file_id : C_HDF5.hid_t;
+	if FAM_CONNECTOR {
+            file_id = C_HDF5.H5Fopen(filename.c_str(), 
+                                         C_HDF5.H5F_ACC_RDONLY, fapl[here.id]);
+	} else {
+            file_id = C_HDF5.H5Fopen(filename.c_str(), 
                                          C_HDF5.H5F_ACC_RDONLY, C_HDF5.H5P_DEFAULT);
-                                         
+	}
         if file_id < 0 { // HF5open returns negative value on failure
             C_HDF5.H5Fclose(file_id);
             throw getErrorWithContext(
@@ -696,10 +724,9 @@ module GenSymIO {
                            moduleName=getModuleName(), 
                            errorClass="HDF5FileFormatError");            
         }
-
         var dName = getReadDsetName(file_id, dsetName);
 
-        if !C_HDF5.H5Lexists(file_id, dName.c_str(), C_HDF5.H5P_DEFAULT) {
+        if (C_HDF5.H5Lexists(file_id, dName.c_str(), C_HDF5.H5P_DEFAULT) <= 0) {
             C_HDF5.H5Fclose(file_id);
             throw getErrorWithContext(
                  msg="The dataset %s does not exist in the file %s".format(dsetName, 
@@ -835,7 +862,7 @@ module GenSymIO {
                                     "checking if isStringsDataset %t".format(e.message())); 
         }
 
-        return groupExists > -1;
+        return groupExists >= 1;
     }
 
     /*
@@ -860,8 +887,7 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),
                                       "checking if isBooleanDataset %t".format(e.message()));
         }
-
-        return groupExists > -1;
+        return groupExists >= 1;
     }
 
     /*
@@ -871,8 +897,14 @@ module GenSymIO {
      * for a file name and invokes isBooleanDataset with file id.
      */
     proc isBooleanDataset(fileName: string, dsetName: string): bool throws {
-        var fileId = C_HDF5.H5Fopen(fileName.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+	var fileId : C_HDF5.hid_t;
+	if FAM_CONNECTOR {
+            fileId = C_HDF5.H5Fopen(fileName.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                                           fapl[here.id]);
+	} else {
+            fileId = C_HDF5.H5Fopen(fileName.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                            C_HDF5.H5P_DEFAULT);                  
+	}
         var boolDataset: bool;
 
         try {
@@ -905,14 +937,22 @@ module GenSymIO {
         var lengths: [FD] int;
         for (i, filename) in zip(FD, filenames) {
             try {
+		var file_id : C_HDF5.hid_t;
+		if FAM_CONNECTOR {
+                file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                                           fapl[here.id]);
+		} else {
                 var file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                            C_HDF5.H5P_DEFAULT);
+		}
                 var dims: [0..#1] C_HDF5.hsize_t; // Only rank 1 for now
                 var dName = try! getReadDsetName(file_id, dsetName);
 
                 // Read array length into dims[0]
                 C_HDF5.HDF5_WAR.H5LTget_dataset_info_WAR(file_id, dName.c_str(), 
                                            c_ptrTo(dims), nil, nil);
+//		C_HDF5.H5LTget_dataset_info(file_id, dName.c_str(),
+//                                           dims, nil, nil);
                 defer {
                     /*
                      * Put close function call in defer block to ensure it's invoked, 
@@ -937,6 +977,9 @@ module GenSymIO {
         for i in FD {
             subdoms[i] = {offset..#lengths[i]};
             offset += lengths[i];
+            gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
+                                          "length: %i offset: %i".format(lengths[i],offset));
+
         }
         return (subdoms, (+ reduce lengths));
     }
@@ -956,18 +999,31 @@ module GenSymIO {
                 var locFiledoms = filedomains;
                 /* On this locale, find all files containing data that belongs in
                  this locale's chunk of A */
+                try! gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
+				    "locale: %t entry.a.localSubdomains() = %t".format(loc,A.localSubdomains()));
                 for (filedom, filename) in zip(locFiledoms, locFiles) {
+		    try! gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
+			"locale: %t filedom: %t".format(loc,filedom));
+                     try! gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
+			"locale: %t filename: %t".format(loc,filename));
                     var isopen = false;
                     var file_id: C_HDF5.hid_t;
                     var dataset: C_HDF5.hid_t;
                     // Look for overlap between A's local subdomains and this file
                     for locdom in A.localSubdomains() {
                         const intersection = domain_intersection(locdom, filedom);
+			try! gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
+			    "locale: %t filedom: %t intersection %t".format(loc,filedom,intersection.size));
                         if intersection.size > 0 {
                             // Only open the file once, even if it intersects with many local subdomains
                             if !isopen {
-                                file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+				if FAM_CONNECTOR {
+                                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                                                                                        fapl[here.id]);
+				} else {
+                                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                                                                         C_HDF5.H5P_DEFAULT);  
+				}
                                 var locDsetName = try! getReadDsetName(file_id,dsetName);                                                                                                      
                                 try! dataset = C_HDF5.H5Dopen(file_id, locDsetName.c_str(), C_HDF5.H5P_DEFAULT);
                                 isopen = true;
@@ -1024,8 +1080,14 @@ module GenSymIO {
             forall fileind in fileSpace with (ref A) {
                 var filedom: subdomain(A.domain) = filedomains[fileind];
                 var filename = filenames[fileind];
-                var file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+		var file_id : C_HDF5.hid_t;
+		if FAM_CONNECTOR {
+                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                                                                       fapl[here.id]);
+		} else {
+                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                                                        C_HDF5.H5P_DEFAULT);
+		}
                 // TODO: use select_hyperslab to read directly into a strided slice of A
                 // Read file into a temporary array and copy into the correct chunk of A
                 var AA: [1..filedom.size] A.eltType;
@@ -1133,6 +1195,12 @@ module GenSymIO {
         
         // Generate a list of matching filenames to test against. 
         var matchingFilenames = getMatchingFilenames(prefix, extension);
+	if FAM_CONNECTOR {
+	    forall filename in filenames do {
+	        var outfile = open(filename, iomode.cw);
+	        outfile.close();
+	    }
+	}
         
         // Create files with groups needed to persist values and segments pdarrays
         var group = getGroup(dsetName);
@@ -1193,8 +1261,14 @@ module GenSymIO {
             gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                    "%s exists? %t".format(myFilename, exists(myFilename)));
 
-            var myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
+	    var myFileID : C_HDF5.hid_t;
+	    if FAM_CONNECTOR {
+                myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
+                                       C_HDF5.H5F_ACC_RDWR, fapl[here.id]);
+	    } else {
+                myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
                                        C_HDF5.H5F_ACC_RDWR, C_HDF5.H5P_DEFAULT);
+	    }
             const locDom = A.localSubdomain();
             var dims: [0..#1] C_HDF5.hsize_t;
             dims[0] = locDom.size: C_HDF5.hsize_t;
@@ -1484,7 +1558,12 @@ module GenSymIO {
         var matchingFilenames = getMatchingFilenames(prefix, extension);
 
         var warnFlag = processFilenames(filenames, matchingFilenames, mode, A);
-
+	if FAM_CONNECTOR {
+	    forall filename in filenames do {
+	        var outfile = open(filename, iomode.cw);
+	        outfile.close();
+	    }
+	}
         /*
          * Iterate through each locale and (1) open the hdf5 file corresponding to the
          * locale (2) prepare pdarray(s) to be written (3) write pdarray(s) to open
@@ -1496,8 +1575,14 @@ module GenSymIO {
             gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                 "%s exists? %t".format(myFilename, exists(myFilename)));
 
-            var myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
+            var myFileID : C_HDF5.hid_t;
+	    if FAM_CONNECTOR {
+                myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
+                                       C_HDF5.H5F_ACC_RDWR, fapl[here.id]);
+	    } else {
+                myFileID = C_HDF5.H5Fopen(myFilename.c_str(), 
                                        C_HDF5.H5F_ACC_RDWR, C_HDF5.H5P_DEFAULT);
+	    }
             const locDom = A.localSubdomain();
             var dims: [0..#1] C_HDF5.hsize_t;
             dims[0] = locDom.size: C_HDF5.hsize_t;
@@ -1696,9 +1781,13 @@ module GenSymIO {
               gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                                              "Creating or truncating file");
 
-              file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
+	      if FAM_CONNECTOR {
+                  file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
+                                                        C_HDF5.H5P_DEFAULT, fapl[here.id]);
+	      } else {
+                  file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
                                                         C_HDF5.H5P_DEFAULT, C_HDF5.H5P_DEFAULT);
-              
+	      }
               prepareGroup(file_id, group);
 
               if file_id < 0 { // Negative file_id means error
@@ -1792,10 +1881,14 @@ module GenSymIO {
               gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                                                               "Creating or truncating file");
 
-              file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
+	      if FAM_CONNECTOR {
+                  file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
+                                                      C_HDF5.H5P_DEFAULT, fapl[here.id]);
+	      } else {
+                  file_id = C_HDF5.H5Fcreate(filenames[loc.id].localize().c_str(), C_HDF5.H5F_ACC_TRUNC,
                                                       C_HDF5.H5P_DEFAULT, C_HDF5.H5P_DEFAULT);
-
-              if file_id < 0 { // Negative file_id means error
+              }
+	      if file_id < 0 { // Negative file_id means error
                   throw getErrorWithContext(
                                      msg="The file %s does not exist".format(filenames[loc.id]),
                                      lineNumber=getLineNumber(), 
