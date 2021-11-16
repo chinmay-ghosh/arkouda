@@ -18,9 +18,12 @@ module GenSymIO {
     use Logging;
     use Message;
     use ServerConfig;
+    require "fam_vol_connector.h";
     
-    config const FAM_CONNECTOR:bool = true;
+    var FAM_CONNECTOR:bool = true;
     extern proc H5Pset_fapl_FAM(fapl : C_HDF5.hid_t) : C_HDF5.herr_t;
+    extern proc get_fam_object(): c_void_ptr;
+    var fam_inst = get_fam_object();
     const gsLogger = new Logger();
   
     if v {
@@ -188,7 +191,7 @@ module GenSymIO {
     /*
      * Converts the JSON array to a pdarray
      */
-    proc jsonToPdArray(json: string, size: int) throws {
+    proc jsonToPdArray(json: string, size: int, isFiles:bool=true) throws {
         var f = opentmp();
         var w = f.writer();
         w.write(json);
@@ -198,6 +201,19 @@ module GenSymIO {
         r.readf("%jt", array);
         r.close();
         f.close();
+	var fam_conn_flag: bool = false;
+	if isFiles {
+	    for i in 0..#size do {
+	        if array[i][0..3] == "FAM:" {
+		    array[i]=array[i][4..];
+		    fam_conn_flag = true;
+		}
+	    }
+	    if fam_conn_flag then 
+		FAM_CONNECTOR = true;
+	    else
+		FAM_CONNECTOR = false;
+	}
         return array;
     }
 
@@ -222,19 +238,20 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
             return new MsgTuple(errorMsg, MsgType.ERROR);                                    
         }
-
+	writeln("lshdfMsg FAM_CONNECTOR = ",FAM_CONNECTOR);
         // Attempt to interpret filename as a glob expression and ls the first result
         var tmp = glob(filename);
 
         gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),
                           "glob expanded filename: %s to size: %i files".format(filename, tmp.size));
-
-        if tmp.size <= 0 {
-            var errorMsg = "No files matching %s".format(filename);
+	if !FAM_CONNECTOR {
+            if tmp.size <= 0 {
+                var errorMsg = "No files matching %s".format(filename);
             
-            gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
-            return new MsgTuple(errorMsg, MsgType.ERROR);
-        }
+                gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
+                return new MsgTuple(errorMsg, MsgType.ERROR);
+            }
+	}
         filename = tmp[tmp.domain.first];
         var exitCode: int;
         var errMsg: string;
@@ -262,6 +279,7 @@ module GenSymIO {
             return new MsgTuple(errorMsg, MsgType.ERROR);
         }
 
+	FAM_CONNECTOR = false;
         if exitCode != 0 {
             var errorMsg = "error opening %s, check file permissions".format(filename);
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
@@ -292,7 +310,7 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
             return new MsgTuple(errorMsg, MsgType.ERROR);                                                           
         }
-
+	writeln("readhdfMsg FAM_CONNECTOR = ",FAM_CONNECTOR);
         var filedom = filelist.domain;
         var filenames: [filedom] string;
 
@@ -417,7 +435,8 @@ module GenSymIO {
                 
                 var repMsg = "created " + st.attrib(segName) + " +created " + st.attrib(valName);
                 gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),repMsg);
-                return new MsgTuple(repMsg, MsgType.NORMAL);
+                FAM_CONNECTOR = false;
+	        return new MsgTuple(repMsg, MsgType.NORMAL);
             }
             when (false, C_HDF5.H5T_INTEGER) {
                 var entryInt = new shared SymEntry(len, int);
@@ -429,6 +448,7 @@ module GenSymIO {
 
                 var repMsg = "created " + st.attrib(rname);
                 gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),repMsg);
+		FAM_CONNECTOR = false;
                 return new MsgTuple(repMsg, MsgType.NORMAL);
             }
             when (false, C_HDF5.H5T_FLOAT) {
@@ -441,6 +461,7 @@ module GenSymIO {
 
                 var repMsg = "created " + st.attrib(rname);
                 gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),repMsg);
+		FAM_CONNECTOR = false;
                 return new MsgTuple(repMsg, MsgType.NORMAL);
             }
             otherwise {
@@ -448,6 +469,7 @@ module GenSymIO {
                                "%t, class %i, size %i, signed? %t".format(isSegArray, 
                                dataclass, bytesize, isSigned);
                 gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
+		FAM_CONNECTOR = false;
                 return new MsgTuple(errorMsg, MsgType.ERROR);
             }
         }
@@ -472,7 +494,7 @@ module GenSymIO {
         var filelist: [0..#nfiles] string;
 
         try {
-            dsetlist = jsonToPdArray(jsondsets, ndsets);
+            dsetlist = jsonToPdArray(jsondsets, ndsets, false);
         } catch {
             var errorMsg = "Could not decode json dataset names via tempfile (%i files: %s)".format(
                                                ndsets, jsondsets);
@@ -487,7 +509,7 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);            
             return new MsgTuple(errorMsg, MsgType.ERROR);
         }
-
+	writeln("readAllHdfMsg FAM_CONNECTOR = ",FAM_CONNECTOR);
         var dsetdom = dsetlist.domain;
         var filedom = filelist.domain;
         var dsetnames: [dsetdom] string;
@@ -646,6 +668,7 @@ module GenSymIO {
                     var errorMsg = "detected unhandled datatype: segmented? %t, class %i, size %i, " +
                                    "signed? %t".format(isSegArray, dataclass, bytesize, isSigned);
                     gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
+		    FAM_CONNECTOR = false;
                     return new MsgTuple(errorMsg, MsgType.ERROR);
                 }
             }
@@ -653,6 +676,7 @@ module GenSymIO {
 
         repMsg = rnames.strip(" , ", leading = false, trailing = true);
         gsLogger.debug(getModuleName(),getRoutineName(),getLineNumber(),repMsg);
+	FAM_CONNECTOR = false;
         return new MsgTuple(repMsg,MsgType.NORMAL);
     }
 
@@ -862,7 +886,11 @@ module GenSymIO {
                                     "checking if isStringsDataset %t".format(e.message())); 
         }
 
-        return groupExists >= 1;
+	if FAM_CONNECTOR {
+            return groupExists >= 1;
+	} else {
+	    return groupExists > -1;
+	}
     }
 
     /*
@@ -887,7 +915,11 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),
                                       "checking if isBooleanDataset %t".format(e.message()));
         }
-        return groupExists >= 1;
+	if FAM_CONNECTOR {
+            return groupExists >= 1;
+	} else {
+	    return groupExists > -1;
+	}
     }
 
     /*
@@ -939,10 +971,10 @@ module GenSymIO {
             try {
 		var file_id : C_HDF5.hid_t;
 		if FAM_CONNECTOR {
-                file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                            fapl[here.id]);
 		} else {
-                var file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
+                    file_id = C_HDF5.H5Fopen(filename.c_str(), C_HDF5.H5F_ACC_RDONLY, 
                                            C_HDF5.H5P_DEFAULT);
 		}
                 var dims: [0..#1] C_HDF5.hsize_t; // Only rank 1 for now
@@ -1126,7 +1158,7 @@ module GenSymIO {
             gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);            
             return new MsgTuple(errorMsg, MsgType.ERROR);
         }
-
+	writeln("tohdfMsg FAM_CONNECTOR = ",FAM_CONNECTOR);
         var warnFlag: bool;
 
         try {
@@ -1169,6 +1201,7 @@ module GenSymIO {
               gsLogger.error(getModuleName(),getRoutineName(),getLineNumber(),errorMsg);
               return new MsgTuple(errorMsg, MsgType.ERROR);
         }
+	FAM_CONNECTOR = false;
         if warnFlag {
              var warnMsg = "Warning: possibly overwriting existing files matching filename pattern";
              return new MsgTuple(warnMsg, MsgType.WARNING);
@@ -1487,7 +1520,7 @@ module GenSymIO {
                       * the previous locale (idx-1) and (2) clear out the current locale
                       * segments list because the current locale values list is now empty.
                       */                     
-                     if isLastLocale(idx) {
+                     if numLocales > 1 && isLastLocale(idx) {
                          if !endsWithCompleteString[idx-1] && isSingleString[idx] 
                                                         && trailingSliceIndices[idx-1] == -1 {
                              valuesList.clear();
